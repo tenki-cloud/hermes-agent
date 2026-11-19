@@ -2,7 +2,7 @@ name: Bench macOS
 # Benchmark fork only: the macOS lane of CI on its own, so it can run while the Mac fleet is idle.
 on:
   push:
-    branches: [bench/macos-tenki]
+    branches: [bench/macos-tenki-tuned]
 
 permissions:
   contents: read

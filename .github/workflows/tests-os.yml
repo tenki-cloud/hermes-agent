@@ -93,6 +93,11 @@ jobs:
             marker: macos
             slice: 2/2
     steps:
+      - name: Stop Spotlight indexing
+        # Benchmark fork only: in-VM mitigation under test (Blacksmith images ship indexing off).
+        if: runner.os == 'macOS'
+        run: sudo mdutil -a -i off
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
