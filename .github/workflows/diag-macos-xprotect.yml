@@ -1,0 +1,61 @@
+name: Diag macOS XProtect
+# Benchmark fork only: what makes a new script's first exec slow on one side and not the other.
+on:
+  push:
+    branches: [diag/macos-xprotect]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.label }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        label: [blacksmith-12vcpu-macos-latest, tenki-macos-26-large]
+    steps:
+      - name: Probe
+        shell: bash
+        run: |
+          set +e
+          mask() { sed -E 's/[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}/<uuid>/g; s/\b[0-9]{1,3}(\.[0-9]{1,3}){3}\b/<ip>/g'; }
+          echo "macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+          echo "SIP: $(csrutil status 2>&1)"
+          echo "Gatekeeper: $(spctl --status 2>&1)"
+          for b in /Library/Apple/System/Library/CoreServices/XProtect.bundle /Library/Apple/System/Library/CoreServices/XProtect.app; do
+            [ -e "$b" ] && echo "$(basename $b): $(defaults read $b/Contents/Info.plist CFBundleShortVersionString 2>&1)"
+          done
+          echo "launchd disabled (xprotect/syspolicy): $(sudo launchctl print-disabled system 2>/dev/null | grep -i -E 'xprotect|syspolicy' | tr -s ' ' | tr '\n' ';')"
+          echo "running: $(ps -Ao comm= | grep -i -E 'xprotect|syspolicyd' | xargs -n1 basename | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+          fresh() {  # $1 dir, $2 n: mean ms of write+chmod+first exec of a new script
+            python3 -I - "$1" "$2" <<'PY'
+          import os, subprocess, sys, time, tempfile
+          d = tempfile.mkdtemp(dir=sys.argv[1]); n = int(sys.argv[2]); out = []
+          for i in range(n):
+              p = os.path.join(d, f"s{i}.sh")
+              open(p, "w").write("#!/bin/sh\nexit 0\n"); os.chmod(p, 0o755)
+              t = time.perf_counter(); subprocess.run([p]); out.append(time.perf_counter() - t)
+          out.sort()
+          b = [];
+          for i in range(n):
+              t = time.perf_counter(); subprocess.run(["/bin/sh", os.path.join(d, f"s{i}.sh")]); b.append(time.perf_counter() - t)
+          b.sort()
+          print(f"{sys.argv[1]:32s} first exec p50 {out[n//2]*1e3:6.1f} ms p90 {out[int(n*.9)]*1e3:6.1f} ms | same files via 'sh file' p50 {b[n//2]*1e3:5.1f} ms")
+          PY
+          }
+          echo "--- new-script first exec by location"
+          mkdir -p "/var/tmp/xp-$(id -u)" "$HOME/xp" "$RUNNER_TEMP/xp" "/tmp/xp-$(id -u)"
+          for d in "/var/tmp/xp-$(id -u)" "/tmp/xp-$(id -u)" "$HOME/xp" "$RUNNER_TEMP/xp"; do fresh "$d" 60; done
+          echo "--- system log while 20 new scripts run (XprotectService / syspolicyd lines)"
+          start=$(date '+%Y-%m-%d %H:%M:%S')
+          fresh "/var/tmp/xp-$(id -u)" 20 >/dev/null
+          sleep 2
+          sudo log show --start "$start" --style compact --predicate 'process == "XprotectService" OR process == "syspolicyd" OR subsystem == "com.apple.xprotect"' 2>/dev/null | mask | cut -c1-200 > /tmp/xplog.txt
+          echo "lines: $(wc -l < /tmp/xplog.txt)"; head -8 /tmp/xplog.txt; echo ...; tail -4 /tmp/xplog.txt
+          echo "--- one exec traced: which daemon wakes (sample log 1 script)"
+          start=$(date '+%Y-%m-%d %H:%M:%S')
+          fresh "/var/tmp/xp-$(id -u)" 1 >/dev/null; sleep 1
+          sudo log show --start "$start" --style compact 2>/dev/null | awk '{print $4}' | sed -E 's/\[[0-9]+:?[0-9a-fx]*\]//' | sort | uniq -c | sort -rn | head -12
