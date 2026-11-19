@@ -1,0 +1,155 @@
+name: Diag IO tuning
+# Benchmark fork only: can settings changed inside the VM give Tenki the same fsync behaviour as Blacksmith?
+on:
+  push:
+    branches: [diag/io-tune]
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    name: tune ${{ matrix.side }}
+    runs-on: ${{ matrix.label }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - side: blacksmith
+            label: blacksmith-32vcpu-ubuntu-2404
+          - side: tenki
+            label: tenki-standard-xlarge-32c-64g
+    env:
+      HERMES_TEST_SLICE: 3/3
+      HERMES_TEST_FORKSERVER: "1"
+      HERMES_TEST_WORKERS: 32
+      HERMES_TEST_FILE_TIMEOUT: 600
+      OPENROUTER_API_KEY: ""
+      OPENAI_API_KEY: ""
+      NOUS_API_KEY: ""
+    steps:
+      - name: Checkout upstream commit
+        uses: actions/checkout@v4
+        with:
+          ref: e93b3da9a8062aebee83894ece5cc7206eddc4e1
+
+      - name: Disk settings as booted, with micro-benchmarks
+        run: |
+          cat > /tmp/iobench.py <<'EOF'
+          import os, sqlite3, statistics as st, sys, time
+          from concurrent.futures import ProcessPoolExecutor
+
+          def pct(xs, p):
+              xs = sorted(xs)
+              return xs[min(len(xs) - 1, int(len(xs) * p))]
+
+          def fsync_lat(args):
+              d, n = args
+              path = os.path.join(d, f"fs-{os.getpid()}")
+              fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+              buf, lats = b"x" * 4096, []
+              for _ in range(n):
+                  os.write(fd, buf)
+                  t = time.perf_counter(); os.fsync(fd); lats.append(time.perf_counter() - t)
+              os.close(fd); os.unlink(path)
+              return lats
+
+          def sqlite_commit(args):
+              d, n, sync = args
+              path = os.path.join(d, f"db-{os.getpid()}-{sync}.sqlite")
+              c = sqlite3.connect(path, isolation_level=None)
+              c.execute("PRAGMA journal_mode=WAL"); c.execute(f"PRAGMA synchronous={sync}")
+              c.execute("CREATE TABLE IF NOT EXISTS t(id INTEGER PRIMARY KEY, v TEXT)")
+              t = time.perf_counter()
+              for _ in range(n):
+                  c.execute("INSERT INTO t(v) VALUES (?)", ("x" * 200,))
+              per = (time.perf_counter() - t) / n
+              c.close()
+              for s in ("", "-wal", "-shm"):
+                  if os.path.exists(path + s): os.unlink(path + s)
+              return per
+
+          def pool(fn, jobs):
+              t = time.perf_counter()
+              with ProcessPoolExecutor(len(jobs)) as ex:
+                  res = list(ex.map(fn, jobs))
+              return time.perf_counter() - t, res
+
+          def main():
+            for d in sys.argv[1:]:
+                os.makedirs(d, exist_ok=True)
+                lats = fsync_lat((d, 2000))
+                print(f"{d:18s} fsync 4k, 1 proc:   p50 {pct(lats, .5)*1e6:7.0f} us  p99 {pct(lats, .99)*1e6:7.0f} us  mean {st.mean(lats)*1e6:7.0f} us")
+                wall, res = pool(fsync_lat, [(d, 300)] * 32)
+                allv = [x for r in res for x in r]
+                print(f"{d:18s} fsync 4k, 32 procs: p50 {pct(allv, .5)*1e6:7.0f} us  p99 {pct(allv, .99)*1e6:7.0f} us  {len(allv)/wall:8.0f} fsync/s in total")
+                for sync in ("FULL", "NORMAL", "OFF"):
+                    print(f"{d:18s} sqlite WAL synchronous={sync:6s} 1 proc:   {sqlite_commit((d, 1000, sync))*1e6:7.0f} us/commit")
+                wall, res = pool(sqlite_commit, [(d, 300, "FULL")] * 32)
+                print(f"{d:18s} sqlite WAL synchronous=FULL   32 procs: {st.mean(res)*1e6:7.0f} us/commit, {32*300/wall:8.0f} commits/s in total")
+
+          if __name__ == "__main__":
+              main()
+          EOF
+          echo "write_cache: $(cat /sys/block/vda/queue/write_cache)"; echo "root: $(findmnt -n -o OPTIONS /)"
+          sysctl vm.dirty_bytes vm.dirty_ratio vm.swappiness
+          python3 /tmp/iobench.py /var/tmp/iobench
+
+      - name: Install ripgrep (same as CI)
+        run: |
+          set -euo pipefail
+          RG_VERSION=15.1.0
+          RG_SHA256=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599
+          RG_TARBALL=ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz
+          curl -sSfL --retry 3 --retry-delay 5 -o "$RG_TARBALL" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_TARBALL}"
+          echo "${RG_SHA256}  ${RG_TARBALL}" | sha256sum -c -
+          tar -xzf "$RG_TARBALL"
+          sudo mv "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" /usr/local/bin/rg
+          rm -rf "$RG_TARBALL" "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
+
+      - name: Set up locked Python and test dependencies (same as CI)
+        uses: ./.github/actions/setup-pm
+        with:
+          packages: pnpm
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
+          test-environment: 'true'
+          prune-python-cache: true
+
+      - name: Tests A, as booted (as CI)
+        run: just test-all
+
+      - name: Change disk settings inside the VM
+        if: matrix.side == 'tenki'
+        run: |
+          set +e
+          try() { echo "--- mount -o remount,$1 /"; sudo mount -o remount,"$1" /; echo "exit=$?  options now: $(findmnt -n -o OPTIONS /)"; sudo dmesg | tail -n 2; }
+          try data=writeback
+          try journal_async_commit
+          try nodiscard
+          try commit=5
+          try nobarrier
+          echo "--- write cache"; echo "write through" | sudo tee /sys/block/vda/queue/write_cache >/dev/null; echo "exit=$?  now: $(cat /sys/block/vda/queue/write_cache)"
+          sudo sysctl -w vm.dirty_bytes=4294967296 vm.swappiness=1
+          python3 /tmp/iobench.py /var/tmp/iobench-tuned
+
+      - name: Tests B, write through and remounted root
+        if: matrix.side == 'tenki'
+        run: just test-all
+
+      - name: Scratch root on a loop ext4 with data=writeback,journal_async_commit
+        if: matrix.side == 'tenki'
+        run: |
+          d="/var/tmp/hermes-pytest-$(id -u)"
+          sudo rm -rf "$d" && mkdir -p "$d"
+          sudo fallocate -l 40G /var/tmp/scratch.img
+          sudo mkfs.ext4 -q -F -E nodiscard /var/tmp/scratch.img
+          sudo mount -o loop,nobarrier,data=writeback,journal_async_commit /var/tmp/scratch.img "$d"
+          sudo chown "$(id -u):$(id -g)" "$d"
+          findmnt -n -o TARGET,SOURCE,FSTYPE,OPTIONS "$d"
+          python3 /tmp/iobench.py "$d/iobench"
+
+      - name: Tests C, scratch root on the loop ext4
+        if: matrix.side == 'tenki'
+        run: just test-all
