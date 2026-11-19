@@ -20,7 +20,12 @@ jobs:
         run: |
           echo "PROF=$RUNNER_TEMP/prof-out" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/prof-out"
-          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/diag/macprof.py" -o "$RUNNER_TEMP/macprof.py"
+          # Authenticated API: raw.githubusercontent.com rate-limits shared egress IPs (HTTP 429).
+          curl -fsSL --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/.github/diag/macprof.py?ref=${{ github.sha }}" \
+            -o "$RUNNER_TEMP/macprof.py"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Host info
         shell: bash
