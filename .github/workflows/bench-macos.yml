@@ -1,0 +1,18 @@
+name: Bench macOS
+# Benchmark fork only: the macOS lane of CI on its own, so it can run while the Mac fleet is idle.
+on:
+  push:
+    branches: [bench/macos-tenki]
+
+permissions:
+  contents: read
+
+jobs:
+  tests-os:
+    name: OS-specific tests
+    uses: ./.github/workflows/tests-os.yml
+    with:
+      commit: e93b3da9a8062aebee83894ece5cc7206eddc4e1
+      desktop_updater: false
+      e2e: false
+      e2e_upgrade: false
