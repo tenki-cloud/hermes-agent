@@ -28,11 +28,17 @@ concurrency:
 jobs:
   catalog-tests:
     name: Catalog tests
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: tenki-standard-medium-4c-8g
     timeout-minutes: 15
     steps:
+      - name: Disk settings like Blacksmith (bench)
+        run: |
+          echo "write through" | sudo tee /sys/block/vda/queue/write_cache >/dev/null
+          sudo mount -o remount,nobarrier,nodiscard,commit=5 /
+          sudo sysctl -q -w vm.dirty_bytes=4294967296 vm.swappiness=1
+          echo "write_cache=$(cat /sys/block/vda/queue/write_cache) root=$(findmnt -n -o OPTIONS /)"
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit }}
           persist-credentials: false

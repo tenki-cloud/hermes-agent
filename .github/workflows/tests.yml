@@ -43,15 +43,21 @@ jobs:
     # scale linearly. run_tests_parallel.py partitions from the checkout alone, so
     # every slice agrees on the split without a planning job.
     name: Run tests (${{ matrix.slice }}/3)
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: tenki-standard-xlarge-32c-64g
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         slice: [1, 2, 3]
     steps:
+      - name: Disk settings like Blacksmith (bench)
+        run: |
+          echo "write through" | sudo tee /sys/block/vda/queue/write_cache >/dev/null
+          sudo mount -o remount,nobarrier,nodiscard,commit=5 /
+          sudo sysctl -q -w vm.dirty_bytes=4294967296 vm.swappiness=1
+          echo "write_cache=$(cat /sys/block/vda/queue/write_cache) root=$(findmnt -n -o OPTIONS /)"
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit }}
 
@@ -145,11 +151,17 @@ jobs:
     # The core suites spawn real serve / gateway / tui_gateway / MCP / SQLite
     # writer processes per test; a 4-vCPU runner serialises them into timeouts.
     if: inputs.e2e
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: tenki-standard-xlarge-32c-64g
     timeout-minutes: 30
     steps:
+      - name: Disk settings like Blacksmith (bench)
+        run: |
+          echo "write through" | sudo tee /sys/block/vda/queue/write_cache >/dev/null
+          sudo mount -o remount,nobarrier,nodiscard,commit=5 /
+          sudo sysctl -q -w vm.dirty_bytes=4294967296 vm.swappiness=1
+          echo "write_cache=$(cat /sys/block/vda/queue/write_cache) root=$(findmnt -n -o OPTIONS /)"
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit }}
 
@@ -275,13 +287,19 @@ jobs:
     # carries the whole tree's wall time against the 60-minute timeout.
     # Skipping this job skips every e2e-upgrade shard with it.
     if: inputs.e2e_upgrade
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: tenki-standard-medium-4c-8g
     timeout-minutes: 5
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
     steps:
+      - name: Disk settings like Blacksmith (bench)
+        run: |
+          echo "write through" | sudo tee /sys/block/vda/queue/write_cache >/dev/null
+          sudo mount -o remount,nobarrier,nodiscard,commit=5 /
+          sudo sysctl -q -w vm.dirty_bytes=4294967296 vm.swappiness=1
+          echo "write_cache=$(cat /sys/block/vda/queue/write_cache) root=$(findmnt -n -o OPTIONS /)"
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit }}
           # The clean-worktree step below loads its action from the checkout.
@@ -319,15 +337,21 @@ jobs:
     # runs ~5-15 min. Sharded by suite directory (see e2e-upgrade-plan).
     name: e2e-upgrade (${{ matrix.shard }})
     needs: e2e-upgrade-plan
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: tenki-standard-xlarge-32c-64g
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(needs.e2e-upgrade-plan.outputs.shards) }}
     steps:
+      - name: Disk settings like Blacksmith (bench)
+        run: |
+          echo "write through" | sudo tee /sys/block/vda/queue/write_cache >/dev/null
+          sudo mount -o remount,nobarrier,nodiscard,commit=5 /
+          sudo sysctl -q -w vm.dirty_bytes=4294967296 vm.swappiness=1
+          echo "write_cache=$(cat /sys/block/vda/queue/write_cache) root=$(findmnt -n -o OPTIONS /)"
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit }}
           # The upgrade start version is the newest release behind HEAD (tests/e2e/core/upgrade/_install_helpers.upgrade_base).

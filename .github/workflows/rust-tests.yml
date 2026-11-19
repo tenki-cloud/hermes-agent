@@ -35,13 +35,19 @@ jobs:
     # cargo builds codegen units and test binaries in parallel across the
     # cores. This lane also builds the crate from the start when Cargo.toml
     # changes.
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: tenki-standard-xlarge-32c-64g
     timeout-minutes: 30
     defaults:
       run:
         working-directory: apps/bootstrap-installer/src-tauri
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - name: Disk settings like Blacksmith (bench)
+        run: |
+          echo "write through" | sudo tee /sys/block/vda/queue/write_cache >/dev/null
+          sudo mount -o remount,nobarrier,nodiscard,commit=5 /
+          sudo sysctl -q -w vm.dirty_bytes=4294967296 vm.swappiness=1
+          echo "write_cache=$(cat /sys/block/vda/queue/write_cache) root=$(findmnt -n -o OPTIONS /)"
+      - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit }}
 
