@@ -1,0 +1,92 @@
+name: Diag hardware
+# Benchmark fork only: hardware and disk configuration of each runner type used in the A/B.
+# Public logs: IPs, serials and UUIDs are masked.
+on:
+  push:
+    branches: [diag/hw]
+
+permissions:
+  contents: read
+
+jobs:
+  hw:
+    name: hw ${{ matrix.label }}
+    runs-on: ${{ matrix.label }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        label:
+          - blacksmith-4vcpu-ubuntu-2404
+          - blacksmith-32vcpu-ubuntu-2404
+          - tenki-standard-medium-4c-8g
+          - tenki-standard-xlarge-32c-64g
+          - blacksmith-12vcpu-macos-latest
+          - tenki-macos-26-xlarge
+    steps:
+      - name: Linux hardware and disk
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          mask() { sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<ip>/g; s/([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}/<mac>/g; s/[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}/<uuid>/g'; }
+          sec() { echo; echo "===== $*"; }
+          sec system
+          uname -r; grep PRETTY_NAME /etc/os-release; echo "virt: $(systemd-detect-virt)"
+          for f in sys_vendor product_name product_version bios_vendor bios_version; do echo "dmi $f: $(cat /sys/class/dmi/id/$f 2>/dev/null)"; done
+          echo "cmdline: $(mask < /proc/cmdline)"
+          sec cpu and memory
+          lscpu | grep -E '^(Model name|Socket|Core|Thread|CPU\(s\)|NUMA node\(s\)|Hypervisor vendor|L2 cache|L3 cache):'
+          grep -m3 -E '^(cpu family|model|stepping)\s' /proc/cpuinfo
+          echo "avx512f: $(grep -c -m1 -w avx512f /proc/cpuinfo)  clocksource: $(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)"
+          free -m; swapon --show
+          echo "vulnerabilities:"; grep -H . /sys/devices/system/cpu/vulnerabilities/* | sed 's|.*/||'
+          sec block devices
+          lsblk -e 7 -o NAME,SIZE,TYPE,ROTA,PHY-SEC,LOG-SEC,DISC-GRAN,DISC-MAX,SCHED,RQ-SIZE,MODEL,MOUNTPOINTS
+          sec queue settings
+          for d in /sys/block/*; do
+            n=${d##*/}; case $n in loop*|ram*|nbd*|zram*) continue;; esac
+            line="$n:"
+            for a in write_cache fua rotational scheduler nr_requests max_sectors_kb max_hw_sectors_kb logical_block_size physical_block_size discard_max_bytes write_zeroes_max_bytes; do
+              line="$line $a=$(cat $d/queue/$a 2>/dev/null | tr ' ' ',')"
+            done
+            echo "$line hw_queues=$(ls $d/mq 2>/dev/null | wc -l) driver=$(basename "$(readlink -f $d/device/driver 2>/dev/null)") model=$(cat $d/device/model 2>/dev/null | xargs)"
+          done
+          sec virtio devices
+          for v in /sys/bus/virtio/devices/*; do echo "${v##*/} device=$(cat $v/device) driver=$(basename "$(readlink -f $v/driver)") features=$(cat $v/features)"; done
+          sec mounts
+          for p in / /var/tmp /tmp /dev/shm "$HOME" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; do findmnt -n -o TARGET,SOURCE,FSTYPE,SIZE,OPTIONS -T "$p" | sed "s|^|$p -> |"; done
+          echo; findmnt -l -t ext4,xfs,btrfs,overlay,tmpfs,virtiofs -o TARGET,SOURCE,FSTYPE,OPTIONS | mask
+          sec df
+          df -hT -x squashfs -x devtmpfs | mask
+          sec root filesystem
+          dev=$(findmnt -n -o SOURCE /); fs=$(findmnt -n -o FSTYPE /); echo "root=$dev fstype=$fs"
+          if [ "$fs" = ext4 ]; then sudo tune2fs -l "$dev" | grep -E '^(Filesystem features|Default mount options|Filesystem flags|Block size|Inode size|Journal size|Journal features|Journal backup|Reserved block count|Errors behavior)' ; fi
+          if [ "$fs" = xfs ]; then xfs_info /; fi
+          sec dirty page and io sysctls
+          sysctl vm.dirty_ratio vm.dirty_background_ratio vm.dirty_bytes vm.dirty_expire_centisecs vm.dirty_writeback_centisecs vm.swappiness vm.vfs_cache_pressure
+          sec kernel messages about disks
+          sudo dmesg | grep -i -E 'virtio_blk|vd[a-z]|nvme|EXT4-fs|XFS|write cache|flush|barrier|blk-mq|scsi|pmem|dax' | mask | head -60
+
+      - name: macOS hardware and disk
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set +e
+          mask() { sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<ip>/g; s/[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}/<uuid>/g'; }
+          sec() { echo; echo "===== $*"; }
+          sec system
+          sw_vers; uname -r; echo "in VM: $(sysctl -n kern.hv_vmm_present)"
+          sysctl hw.model machdep.cpu.brand_string hw.ncpu hw.physicalcpu hw.logicalcpu hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu hw.memsize hw.pagesize 2>/dev/null
+          echo "HostName: $(scutil --get HostName 2>&1) | LocalHostName: $(scutil --get LocalHostName 2>&1) | hostname: $(hostname)" | mask
+          sec hardware
+          system_profiler SPHardwareDataType | grep -v -i -E 'serial|uuid|provisioning|udid'
+          sec storage
+          system_profiler SPStorageDataType SPNVMeDataType 2>/dev/null | grep -v -i -E 'serial|uuid' | mask
+          sec disks
+          diskutil list | mask
+          diskutil info / | grep -E 'Device Node|File System Personality|Protocol|Solid State|Virtual|Media Name|Disk Size|Container Total|Container Free|Device Block Size|Allocation Block Size|Owners|FileVault|Encrypted|TRIM'
+          sec mounts
+          mount | mask; df -h | mask
+          sec temp dirs
+          for p in /tmp /var/tmp "$TMPDIR" "$RUNNER_TEMP" "$GITHUB_WORKSPACE" "$HOME"; do echo "$p -> $(df -P "$p" | tail -1 | awk '{print $1, $6}')"; done
