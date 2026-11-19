@@ -1,0 +1,136 @@
+name: Diag macOS profile job
+on:
+  workflow_call:
+    inputs:
+      label: {type: string, required: true}
+      slice: {type: string, required: true}
+      workers: {type: string, default: ''}
+
+permissions:
+  contents: read
+
+jobs:
+  prof:
+    name: prof
+    runs-on: ${{ inputs.label }}
+    timeout-minutes: 30
+    steps:
+      - name: Fetch profiler
+        shell: bash
+        run: |
+          echo "PROF=$RUNNER_TEMP/prof-out" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/prof-out"
+          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/diag/macprof.py" -o "$RUNNER_TEMP/macprof.py"
+
+      - name: Host info
+        shell: bash
+        run: python3 -I "$RUNNER_TEMP/macprof.py" hostinfo
+
+      - name: Set git identity
+        # Tenki VM hostnames carry no domain, so git cannot derive an email; same config on both sides.
+        shell: bash
+        run: |
+          git config --global user.name "CI Bench"
+          git config --global user.email "ci-bench@example.invalid"
+          git config --system user.name "CI Bench" 2>/dev/null || true
+          git config --system user.email "ci-bench@example.invalid" 2>/dev/null || true
+
+      - name: Checkout code (Blacksmith)
+        if: startsWith(inputs.label, 'blacksmith')
+        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        with:
+          ref: e93b3da9a8062aebee83894ece5cc7206eddc4e1
+
+      - name: Checkout code (Tenki)
+        if: ${{ !startsWith(inputs.label, 'blacksmith') }}
+        uses: actions/checkout@v4
+        with:
+          ref: e93b3da9a8062aebee83894ece5cc7206eddc4e1
+
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          packages: 'ripgrep,pnpm'
+          extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
+          test-environment: 'true'
+          prune-python-cache: true
+
+      - name: Bench network
+        shell: bash
+        run: '"$HERMES_PYTHON" -I "$RUNNER_TEMP/macprof.py" netbench'
+
+      - name: Bench CPU scaling
+        shell: bash
+        run: '"$HERMES_PYTHON" -I "$RUNNER_TEMP/macprof.py" cpubench'
+
+      - name: Bench process spawn
+        shell: bash
+        run: |
+          export PROF_DIR="/var/tmp/hermes-pytest-$(id -u)"
+          mkdir -p "$PROF_DIR"
+          "$HERMES_PYTHON" -I "$RUNNER_TEMP/macprof.py" spawnbench
+
+      - name: Bench disk (test scratch volume)
+        shell: bash
+        run: '"$HERMES_PYTHON" -I "$RUNNER_TEMP/macprof.py" diskbench "/var/tmp/hermes-pytest-$(id -u)/prof"'
+
+      - name: Start sampler
+        shell: bash
+        run: |
+          rm -f "$PROF/STOP"
+          nohup "$HERMES_PYTHON" -I "$RUNNER_TEMP/macprof.py" sampler "$PROF" > "$PROF/sampler.log" 2>&1 &
+          nohup vm_stat 2 > "$PROF/vm_stat.txt" 2>&1 &
+          nohup iostat -d -w 2 disk0 > "$PROF/iostat.txt" 2>&1 &
+          sleep 2
+
+      - name: Run macos tests
+        # Same script as tests-os.yml's "Run macos tests" step (marker macos, desktop_updater off).
+        shell: bash
+        run: |
+          set -uo pipefail
+          LIST="${RUNNER_TEMP:-.}/selected-tests.txt"
+          if ! python scripts/ci/list_os_marked_tests.py macos > "$LIST"; then
+            echo "::error::could not enumerate macos test files"
+            exit 1
+          fi
+          if [ ! -s "$LIST" ]; then
+            echo "::error::empty macos file list"
+            exit 1
+          fi
+          echo "selected file(s) for macos:"
+          cat "$LIST"
+          EXTRA_ARGS=()
+          echo "desktop_updater lane off: skipping tests/scripts/desktop_update/test_desktop_update_windows_*.py"
+          EXTRA_ARGS+=(--ignore-glob='*test_desktop_update_windows_*.py')
+          SEPARATOR="$(python -c 'import os, sys; sys.stdout.write(os.pathsep)')"
+          FILES="$(tr -d '\r' < "$LIST" | paste -sd "$SEPARATOR" -)"
+          scripts/run_tests.sh --files "$FILES" -- \
+            ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
+            -m "platforms and not integration" \
+            -v --tb=short
+        env:
+          HERMES_TEST_WORKERS: ${{ inputs.workers }}
+          HERMES_TEST_SLICE: ${{ inputs.slice }}
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
+
+      - name: Sampler summary
+        if: always()
+        shell: bash
+        run: |
+          touch "$PROF/STOP"; sleep 2
+          pkill -f "vm_stat 2" || true; pkill -f "iostat -d -w 2" || true
+          "$HERMES_PYTHON" -I "$RUNNER_TEMP/macprof.py" summarize "$PROF"
+          echo "post-test: swap $(sysctl -n vm.swapusage); $(memory_pressure -Q | tail -1)"
+
+      - name: Check the checkout is clean
+        uses: ./.github/actions/check-clean-worktree
+
+      - name: Upload samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prof-${{ inputs.label }}-${{ inputs.slice == '1/2' && 's1' || 's2' }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prof-out
+          retention-days: 7

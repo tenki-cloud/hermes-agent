@@ -1,0 +1,39 @@
+name: Diag macOS profile
+# Benchmark fork only: profile the macOS lane on Blacksmith 12 vCPU, Tenki 14c and Tenki 8c.
+# Tenki 8c runs after 14c so the two never share the Mac fleet. Public logs: no IPs, serials or UUIDs.
+on:
+  push:
+    branches: [diag/macos-prof]
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: HERMES_TEST_WORKERS override (empty = cpu count, like CI)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  p14:
+    name: ${{ matrix.label }} ${{ matrix.slice }}
+    strategy:
+      fail-fast: false
+      matrix:
+        label: [blacksmith-12vcpu-macos-latest, tenki-macos-26-xlarge]
+        slice: ['1/2', '2/2']
+    uses: ./.github/workflows/diag-macos-prof-job.yml
+    with:
+      label: ${{ matrix.label }}
+      slice: ${{ matrix.slice }}
+      workers: ${{ inputs.workers || '' }}
+
+  p8:
+    name: tenki-macos-26-large 1/2
+    needs: p14
+    if: always()
+    uses: ./.github/workflows/diag-macos-prof-job.yml
+    with:
+      label: tenki-macos-26-large
+      slice: '1/2'
+      workers: ${{ inputs.workers || '' }}
