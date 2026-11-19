@@ -50,6 +50,12 @@ jobs:
       matrix:
         slice: [1, 2, 3]
     steps:
+      - name: Disk settings like Blacksmith (bench)
+        run: |
+          echo "write through" | sudo tee /sys/block/vda/queue/write_cache >/dev/null
+          sudo mount -o remount,nobarrier,nodiscard,commit=5 /
+          sudo sysctl -q -w vm.dirty_bytes=4294967296 vm.swappiness=1
+          echo "write_cache=$(cat /sys/block/vda/queue/write_cache) root=$(findmnt -n -o OPTIONS /)"
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -148,6 +154,12 @@ jobs:
     runs-on: tenki-standard-xlarge-32c-64g
     timeout-minutes: 30
     steps:
+      - name: Disk settings like Blacksmith (bench)
+        run: |
+          echo "write through" | sudo tee /sys/block/vda/queue/write_cache >/dev/null
+          sudo mount -o remount,nobarrier,nodiscard,commit=5 /
+          sudo sysctl -q -w vm.dirty_bytes=4294967296 vm.swappiness=1
+          echo "write_cache=$(cat /sys/block/vda/queue/write_cache) root=$(findmnt -n -o OPTIONS /)"
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -280,6 +292,12 @@ jobs:
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
     steps:
+      - name: Disk settings like Blacksmith (bench)
+        run: |
+          echo "write through" | sudo tee /sys/block/vda/queue/write_cache >/dev/null
+          sudo mount -o remount,nobarrier,nodiscard,commit=5 /
+          sudo sysctl -q -w vm.dirty_bytes=4294967296 vm.swappiness=1
+          echo "write_cache=$(cat /sys/block/vda/queue/write_cache) root=$(findmnt -n -o OPTIONS /)"
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -326,6 +344,12 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.e2e-upgrade-plan.outputs.shards) }}
     steps:
+      - name: Disk settings like Blacksmith (bench)
+        run: |
+          echo "write through" | sudo tee /sys/block/vda/queue/write_cache >/dev/null
+          sudo mount -o remount,nobarrier,nodiscard,commit=5 /
+          sudo sysctl -q -w vm.dirty_bytes=4294967296 vm.swappiness=1
+          echo "write_cache=$(cat /sys/block/vda/queue/write_cache) root=$(findmnt -n -o OPTIONS /)"
       - name: Checkout code
         uses: actions/checkout@v4
         with:
