@@ -1,0 +1,103 @@
+name: Diag CPU and disk
+# Benchmark fork only: CPU identity, effective clock and disk performance of each runner type. Public logs: no serials or IPs.
+on:
+  push:
+    branches: [diag/hwperf]
+
+permissions:
+  contents: read
+
+jobs:
+  perf:
+    name: perf ${{ matrix.label }} (${{ matrix.n }})
+    runs-on: ${{ matrix.label }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {label: blacksmith-32vcpu-ubuntu-2404, n: 1}
+          - {label: blacksmith-32vcpu-ubuntu-2404, n: 2}
+          - {label: blacksmith-32vcpu-ubuntu-2404, n: 3}
+          - {label: tenki-standard-xlarge-32c-64g, n: 1}
+          - {label: tenki-standard-xlarge-32c-64g, n: 2}
+          - {label: blacksmith-4vcpu-ubuntu-2404, n: 1}
+          - {label: blacksmith-4vcpu-ubuntu-2404, n: 2}
+          - {label: tenki-standard-medium-4c-8g, n: 1}
+    steps:
+      - name: Install fio and 7-Zip
+        run: |
+          sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq fio p7zip-full >/dev/null
+          fio --version; 7z | head -2 | tail -1
+
+      - name: CPU identity
+        run: |
+          lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core|Socket|L2 cache|L3 cache|CPU max MHz|CPU MHz|BogoMIPS):'
+          grep -m4 -E '^(cpu family|model|stepping|microcode)\s' /proc/cpuinfo
+          echo "cpu MHz (reported): $(grep -m1 'cpu MHz' /proc/cpuinfo | cut -d: -f2)"
+          f=$(grep -m1 '^flags' /proc/cpuinfo)
+          for x in avx512f avx512_bf16 avx512_vnni avx512_vp2intersect avx_vnni vaes sha_ni hypervisor; do printf '%s=%s ' $x "$(echo "$f" | grep -qw $x && echo y || echo n)"; done; echo
+          cat > /tmp/freq.c <<'EOF'
+          #include <cpuid.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <time.h>
+          static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
+          int main(int argc, char **argv) {
+            if (argc > 1) {
+              unsigned int r[12]; char brand[49] = {0};
+              for (int i = 0; i < 3; i++) __get_cpuid(0x80000002 + i, &r[i*4], &r[i*4+1], &r[i*4+2], &r[i*4+3]);
+              memcpy(brand, r, 48); printf("cpuid brand string: [%s]\n", brand); return 0;
+            }
+            unsigned long x = 0, n = 3000000000UL;
+            double t0 = now();
+            for (unsigned long i = 0; i < n; i += 8)
+              __asm__ volatile("add $1,%0\n\tadd $1,%0\n\tadd $1,%0\n\tadd $1,%0\n\tadd $1,%0\n\tadd $1,%0\n\tadd $1,%0\n\tadd $1,%0" : "+r"(x));
+            printf("%.2f\n", n / (now() - t0) / 1e9);
+            return (int)(x & 0);
+          }
+          EOF
+          gcc -O1 -o /tmp/freq /tmp/freq.c
+          /tmp/freq brand
+          /tmp/freq >/dev/null
+          echo "effective clock, 1 thread (GHz): $(/tmp/freq) $(/tmp/freq) $(/tmp/freq)"
+          echo "effective clock, all $(nproc) threads at once (GHz, sorted): $(seq $(nproc) | xargs -P $(nproc) -I{} /tmp/freq | sort -n | tr '\n' ' ')"
+
+      - name: 7-Zip benchmark
+        run: |
+          7z b -mmt1 | grep -E '^(Avr|Tot):' | sed 's/^/1 thread  /'
+          7z b | grep -E '^(Avr|Tot):' | sed 's/^/all threads /'
+
+      - name: Disk identity
+        run: |
+          for d in /sys/block/vd? /sys/block/nvme?n? /sys/block/sd?; do [ -e "$d" ] || continue; echo "${d##*/}: size=$(( $(cat $d/size) / 2097152 ))GiB serial=[$(cat $d/serial 2>/dev/null)] model=[$(cat $d/device/model 2>/dev/null | xargs)] vendor=[$(cat $d/device/vendor 2>/dev/null | xargs)] write_cache=$(cat $d/queue/write_cache) hw_queues=$(ls $d/mq 2>/dev/null | wc -l)"; done
+          udevadm info --query=property /dev/vda 2>/dev/null | grep -E '^ID_(MODEL|SERIAL|VENDOR|BUS|PATH)=' | sed -E 's/[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}/<uuid>/g'
+          findmnt -n -o SOURCE,FSTYPE,OPTIONS /
+
+      - name: Disk performance (fio, root disk, O_DIRECT)
+        run: |
+          d="$RUNNER_TEMP/fio"; mkdir -p "$d"
+          run() { name=$1; shift; fio --name="$name" --directory="$d" --filename=fio.dat --size=8G --direct=1 --ioengine=libaio --time_based --runtime=15 --group_reporting --output-format=json "$@" > "$d/$name.json"; }
+          run seq-write   --rw=write     --bs=1M --iodepth=32
+          run seq-read    --rw=read      --bs=1M --iodepth=32
+          run rand-read-qd1    --rw=randread  --bs=4k --iodepth=1
+          run rand-read-4xqd32 --rw=randread  --bs=4k --iodepth=32 --numjobs=4
+          run rand-write-qd1   --rw=randwrite --bs=4k --iodepth=1
+          run rand-write-4xqd32 --rw=randwrite --bs=4k --iodepth=32 --numjobs=4
+          run fdatasync-4k     --rw=randwrite --bs=4k --iodepth=1 --fdatasync=1
+          python3 - "$d" <<'EOF'
+          import json, os, sys
+          d = sys.argv[1]
+          print(f"{'test':20s} {'MB/s':>9s} {'IOPS':>10s} {'lat p50 us':>11s} {'lat p99 us':>11s}")
+          for name in ["seq-write", "seq-read", "rand-read-qd1", "rand-read-4xqd32", "rand-write-qd1", "rand-write-4xqd32", "fdatasync-4k"]:
+              j = json.load(open(os.path.join(d, name + ".json")))["jobs"][0]
+              side = j["read"] if j["read"]["io_bytes"] > 0 else j["write"]
+              pct = side["clat_ns"].get("percentile", {})
+              p50 = pct.get("50.000000", 0) / 1e3; p99 = pct.get("99.000000", 0) / 1e3
+              extra = ""
+              if name == "fdatasync-4k":
+                  s = j.get("sync", {}).get("lat_ns", {}); sp = s.get("percentile", {})
+                  extra = f"  fdatasync p50 {sp.get('50.000000', 0)/1e3:.0f} us, p99 {sp.get('99.000000', 0)/1e3:.0f} us"
+              print(f"{name:20s} {side['bw_bytes']/1e6:9.0f} {side['iops']:10.0f} {p50:11.0f} {p99:11.0f}{extra}")
+          EOF
+          rm -rf "$d"
