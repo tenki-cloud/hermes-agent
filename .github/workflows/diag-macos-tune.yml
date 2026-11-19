@@ -1,0 +1,22 @@
+name: Diag macOS tune
+# Benchmark fork only: Tenki 14c with Spotlight indexing off vs Blacksmith 12 vCPU as shipped.
+on:
+  push:
+    branches: [diag/macos-tune]
+
+permissions:
+  contents: read
+
+jobs:
+  t14:
+    name: ${{ matrix.label }} ${{ matrix.slice }}
+    strategy:
+      fail-fast: false
+      matrix:
+        label: [blacksmith-12vcpu-macos-latest, tenki-macos-26-xlarge]
+        slice: ['1/2', '2/2']
+    uses: ./.github/workflows/diag-macos-prof-job.yml
+    with:
+      label: ${{ matrix.label }}
+      slice: ${{ matrix.slice }}
+      tune: ${{ startsWith(matrix.label, 'tenki') }}

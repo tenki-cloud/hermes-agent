@@ -5,6 +5,7 @@ on:
       label: {type: string, required: true}
       slice: {type: string, required: true}
       workers: {type: string, default: ''}
+      tune: {type: boolean, default: false}
 
 permissions:
   contents: read
@@ -39,6 +40,18 @@ jobs:
           git config --global user.email "ci-bench@example.invalid"
           git config --system user.name "CI Bench" 2>/dev/null || true
           git config --system user.email "ci-bench@example.invalid" 2>/dev/null || true
+
+      - name: Tune VM (Spotlight off, Gatekeeper probe)
+        # In-VM mitigation under test: stop Spotlight indexing (Blacksmith images ship it off).
+        if: inputs.tune
+        shell: bash
+        run: |
+          echo "csrutil: $(csrutil status 2>&1)"
+          echo "spctl before: $(spctl --status 2>&1)"
+          sudo mdutil -a -i off >/dev/null 2>&1 || true
+          mdutil -s / /System/Volumes/Data 2>&1 | grep -v '^$'
+          sudo spctl --master-disable 2>&1 | head -2 || true
+          echo "spctl after: $(spctl --status 2>&1)"
 
       - name: Checkout code (Blacksmith)
         if: startsWith(inputs.label, 'blacksmith')
